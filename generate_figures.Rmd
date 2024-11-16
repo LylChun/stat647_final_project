@@ -1,0 +1,74 @@
+---
+title: "Generate Figures"
+author: "Elizabeth Chun"
+date: "2024-11-16"
+output: html_document
+---
+
+```{r, message = FALSE,  warning=FALSE}
+# load packages
+library(tidyverse)
+library(tictoc)
+
+# library(geoR)
+# library(BRISC)
+# 
+# # plotting
+# library(sf)
+# library("rnaturalearth")
+
+
+library(lattice)
+```
+
+# simulate from exponential
+
+```{r}
+set.seed(10) # for reproducibility
+
+# set n and beta
+n = 5625
+beta = c(1, 2)
+
+## generate random points and plug into both X and si
+
+# # note X includes a column for the intercept
+# X = tibble(
+#   int = rep(1, n),
+#   loni = 1:100,
+#   lati = 1:100
+# )
+
+covar = rnorm(n, 2, 0.1)
+si <- expand.grid(lon = 1:75, lat = 1:75)
+X = cbind(1, covar)
+
+# si = X[, 2:3] # si is only the long/lat coords
+
+# calculate distance
+distmat = fields::rdist(si)
+
+# plug distance matrix into covariance function
+cov = 2*exp(-distmat/10)
+
+# generate observations from multivariate normal
+spatialrand = t(chol(cov)) %*% rnorm(n)
+
+# generate nugget effect
+nugget = rnorm(n, 0, sqrt(0.1)) # note square root because r takes SD
+
+# combine into observations
+y = as.matrix(X) %*% beta + spatialrand + nugget 
+
+```
+
+
+```{r}
+plot_mat = cbind(si, y)
+colnames(plot_mat) = c("lon", 'lat', 'y')
+
+rgb.palette <- colorRampPalette(c("blue", 'white', "red"), space = 'Lab')
+levelplot(y ~ lon + lat, data=plot_mat, col.regions = rgb.palette(120), at=seq(min(y), max(y), length.out=120),
+          xlab = "", ylab = "", main = "Isotropic Covariance Function")
+```
+
