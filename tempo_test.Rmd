@@ -1,0 +1,288 @@
+---
+title: "TEMPO"
+author: "Elizabeth Chun"
+date: "2024-11-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+
+library(ncdf4)
+library(CFtime)
+library(lattice)
+library(RColorBrewer)
+
+library(geosphere)
+
+library(BRISC)
+
+# plotting
+library(sf)
+library("rnaturalearth")
+library(basemapR)
+```
+
+# Load TEMPO data
+
+```{r}
+ncin <- nc_open('final_project/C2930725014-LARC_CLOUD_merged_3nods.nc4')
+print(ncin)
+
+lat = ncvar_get(ncin,"geolocation/latitude")
+lon = ncvar_get(ncin,"geolocation/longitude")
+# time = ncvar_get(ncin,"geolocation/time")
+
+no2 = ncvar_get(ncin,"product/vertical_column_troposphere")
+qa_flag = ncvar_get(ncin,"product/main_data_quality_flag")
+
+no2_df = tibble(
+  lat = as.vector(lat),
+  lon = as.vector(lon),
+  no2 = as.vector(no2),
+  qa_flag = as.vector(qa_flag)
+)
+```
+
+# process NO2 data
+
+Filter for quality checking and add distance to nearest big city
+
+```{r}
+no2_df_clean = no2_df %>%
+  filter(complete.cases(.) & qa_flag == 0) %>%
+  filter(no2 > 0)
+```
+
+```{r}
+no2_sf = st_as_sf(no2_df_clean, coords = c("lon", "lat"), crs = 4326)
+```
+
+
+```{r}
+# major cities
+cities = tibble(
+  names = c('austin', 'houston', 'san_antonio', 'el_paso', 'dallas', 'ftworth'),
+  lon = c(-97.7431, -95.3701, -98.4946, -106.4850, -96.7970, -97.3308),
+  lat = c(30.2672, 29.7601, 29.4252, 31.7619, 32.7767, 32.7555)
+) 
+
+cities_sf = st_as_sf(cities, coords = c("lon", "lat"), crs = 4326)
+```
+
+
+```{r}
+redo = FALSE
+if (redo) {
+  no2_dist = no2_df_clean
+
+  for (city in cities$names) {
+    citycenter = cities %>%
+      filter(names == city)
+    no2_dist[city] = distGeo(citycenter[, 2:3], no2_dist[, c("lon", "lat")])
+  }
+  
+  no2_dist_city = no2_dist %>%
+    rowwise() %>%
+    mutate(
+      dist_to_city = min(across(austin:ftworth)),
+      city = cities$names[which.min(across(austin:ftworth))]
+    ) %>%
+    ungroup()
+} else {
+  no2_dist_city = readRDS("final_project/no2_dist_city.rds")
+}
+
+```
+
+```{r}
+no2_dist_city = no2_dist_city %>%
+  mutate(
+    # multiply by rough height of column to get molecules/cubic cm
+    # divide by average number of molecules/cubic cm 
+    ## both conversions very rough
+    no2_ppm = no2*12000 / (2.46*10^19)
+  ) 
+
+tx_xform = sf::st_transform(tx, crs = 4326)
+no2_dist_city_sf = st_as_sf(no2_dist_city, coords = c("lon", "lat"), crs = 4326)
+no2_df_final_sf = no2_dist_city_sf[tx_xform, ]
+
+no2_df_final = no2_df_final_sf %>% 
+  st_drop_geometry() %>%  
+  bind_cols(st_coordinates(no2_df_final_sf)) %>%
+  select(lon = X, lat = Y, no2_ppm, dist_to_city, city, austin, houston, san_antonio, el_paso, dallas, ftworth)
+```
+
+```{r}
+bbox_no2 = st_bbox(no2_df_final_sf)
+
+ggplot(no2_df_final_sf[sample(nrow(no2_df_final_sf), 20000), ]) + 
+  base_map(bbox_no2, increase_zoom = 4, basemap = 'mapnik') +
+  geom_sf(aes(color = no2_ppm), alpha = 0.1) +
+  scale_color_gradient2(low = 'green', mid = 'red', high = "red", 
+                       limits = c(0, 34), na.value = NA, midpoint = 14)
+```
+
+# data split - random
+
+```{r data splitting}
+### data splitting
+set.seed(27)
+
+# get 80/20 train test split
+train_idx = sample(nrow(no2_df_final), 0.8*nrow(no2_df_final))
+train_all = no2_df_final[train_idx, ]
+test_all = no2_df_final[-train_idx, ]
+```
+
+```{r}
+st_as_sf(test_all, coords = c("lon", "lat"), crs = 4326) %>%
+  ggplot() + 
+    base_map(bbox_no2, increase_zoom = 4, basemap = 'mapnik') +
+    geom_sf(aes(color = no2_ppm), alpha = 0.75) +
+    scale_color_gradient2(low = 'white', mid = '#FF474D', high = "red", 
+                         limits = c(0, 35), na.value = NA, midpoint = 18)
+```
+
+
+
+# 3.2 Nearest neighbors GP
+
+Now I will fit an NNGP on the entire training set with neighbors using the BRISC package.
+
+```{r fit nngp}
+fit_nngp = BRISC_estimation(coords = as.matrix(train_all[, c('lon', 'lat')]), 
+                            x = cbind(1, as.matrix(
+                              train_all[, c('dist_to_city', 'lon', 'lat')])), 
+                            y = train_all$no2_ppm, 
+                            cov.model = 'exponential', n.neighbors = 20)
+print(fit_nngp$Beta)
+print(fit_nngp$Theta)
+```
+
+
+
+# 4. Model results and predictions
+
+## 4.2 Nearest neighbors GP
+
+For the NNGP, here are the estimated parameters. Note that BRISC reports $\phi$ as the reciprocal of the standard definition so I have taken $\frac{1}{\phi}$.
+
+$\hat{\beta}$'s = [`r fit_nngp$Beta`]  
+$\hat{\sigma}^2$ = `r fit_nngp$Theta[1]`  
+$\phi$ = `r 1/fit_nngp$Theta[3]`  
+$\hat{\tau}^2$ = `r fit_nngp$Theta[2]`    
+
+
+```{r nngp prediction}
+preds_nngp = BRISC_prediction(fit_nngp, coords.0 = as.matrix(test_all[, c('lon', 'lat')]), 
+                              X.0 = cbind(1, as.matrix(
+                                test_all[, c('dist_to_city', 'lon', 'lat')])))
+rmse_nngp = sqrt(mean((test_all$no2_ppm - preds_nngp$prediction)^2))
+mape = mean(abs(test_all$no2_ppm - preds_nngp$prediction)/test_all$no2_ppm*100)
+
+resids = test_all$no2_ppm - preds_nngp$prediction
+
+print(rmse_nngp)
+print(mape)
+
+hist(resids)
+hist(preds_nngp$prediction)
+```
+
+```{r}
+# plot random predictions map
+
+pred_df_rand = test_all[, c('lon', 'lat')] %>%
+  mutate(
+    no2_ppm_pred = preds_nngp$prediction
+  ) 
+pred_df_rand_sf = st_as_sf(pred_df_rand, coords = c("lon", "lat"), crs = 4326)
+
+ggplot(pred_df_rand_sf) + 
+  base_map(bbox_no2, increase_zoom = 4, basemap = 'mapnik') +
+  geom_sf(aes(color = no2_ppm_pred), alpha = 0.75) +
+  scale_color_gradient2(low = 'white', mid = '#FF474D', high = "red", 
+                       limits = c(0, 34), na.value = NA, midpoint = 17)
+```
+
+
+# data splitting
+
+```{r data splitting}
+
+# get holdout city test split
+train_idx = which(no2_df_final$city != 'ftworth')
+train_all = no2_df_final[train_idx, ]
+test_all = no2_df_final[-train_idx, ]
+```
+
+```{r}
+st_as_sf(test_all, coords = c("lon", "lat"), crs = 4326) %>%
+  ggplot() + 
+    base_map(bbox_no2, increase_zoom = 4, basemap = 'mapnik') +
+    geom_sf(aes(color = no2_ppm), alpha = 0.75) +
+    scale_color_gradient2(low = 'white', mid = '#FF474D', high = "red", 
+                         limits = c(0, 35), na.value = NA, midpoint = 18)
+```
+
+
+## 3.2 Nearest neighbors GP
+
+Now I will fit an NNGP on the entire training set with neighbors using the BRISC package.
+
+```{r fit nngp}
+fit_nngp2 = BRISC_estimation(coords = as.matrix(train_all[, c('lon', 'lat')]), 
+                            x = cbind(1, as.matrix(train_all[, c('lon', 'lat')])), 
+                            y = train_all$no2_ppm, 
+                            cov.model = 'exponential', n.neighbors = 20)
+print(fit_nngp2$Beta)
+print(fit_nngp2$Theta)
+```
+
+
+
+# 4. Model results and predictions
+
+## 4.2 Nearest neighbors GP
+
+For the NNGP, here are the estimated parameters. Note that BRISC reports $\phi$ as the reciprocal of the standard definition so I have taken $\frac{1}{\phi}$.
+
+$\hat{\beta}$'s = [`r fit_nngp$Beta`]  
+$\hat{\sigma}^2$ = `r fit_nngp$Theta[1]`  
+$\phi$ = `r 1/fit_nngp$Theta[3]`  
+$\hat{\tau}^2$ = `r fit_nngp$Theta[2]`    
+
+
+```{r nngp prediction}
+preds_nngp2 = BRISC_prediction(fit_nngp2, coords.0 = as.matrix(test_all[,  c('lon', 'lat')]), 
+                              X.0 = cbind(1, as.matrix(test_all[,  c('lon', 'lat')])))
+rmse_nngp2 = sqrt(mean((test_all$no2_ppm - preds_nngp2$prediction)^2))
+mape2 = mean(abs(test_all$no2_ppm - preds_nngp2$prediction)/test_all$no2_ppm*100)
+
+resids2 = test_all$no2_ppm - preds_nngp2$prediction
+
+print(rmse_nngp2)
+print(mape2)
+hist(resids2)
+hist(preds_nngp2$prediction)
+```
+
+
+```{r}
+# plot random predictions map
+
+pred_df_rand = test_all[, c('lon', 'lat')] %>%
+  mutate(
+    no2_ppm_pred = preds_nngp2$prediction
+  ) 
+pred_df_rand_sf = st_as_sf(pred_df_rand, coords = c("lon", "lat"), crs = 4326)
+
+ggplot(pred_df_rand_sf) + 
+  base_map(bbox_no2, increase_zoom = 4, basemap = 'mapnik') +
+  geom_sf(aes(color = no2_ppm_pred), alpha = 0.75) +
+  scale_color_gradient2(low = 'white', mid = '#FF474D', high = "red", 
+                       limits = c(0, 34), na.value = NA, midpoint = 17)
+```
+
