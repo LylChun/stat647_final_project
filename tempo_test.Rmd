@@ -114,14 +114,25 @@ no2_df_final = no2_df_final_sf %>%
   select(lon = X, lat = Y, no2_ppm, dist_to_city, city, austin, houston, san_antonio, el_paso, dallas, ftworth)
 ```
 
+
+
+```{r}
+# try to read highways
+highways = sf::st_read('final_project/highways/Texas_National_Highway_Freight_Network.shp')
+```
+
+
 ```{r}
 bbox_no2 = st_bbox(no2_df_final_sf)
 
-ggplot(no2_df_final_sf[sample(nrow(no2_df_final_sf), 20000), ]) + 
-  base_map(bbox_no2, increase_zoom = 4, basemap = 'mapnik') +
-  geom_sf(aes(color = no2_ppm), alpha = 0.1) +
-  scale_color_gradient2(low = 'green', mid = 'red', high = "red", 
-                       limits = c(0, 34), na.value = NA, midpoint = 14)
+ggplot() + 
+  base_map(bbox_no2, increase_zoom = 3, basemap = 'mapnik') +
+  geom_sf(data = no2_df_final_sf[sample(nrow(no2_df_final_sf), 20000), ],
+          aes(color = no2_ppm), size = 2) +
+  scale_color_gradient2(low = '#00FF0010', mid = '#FFA500CC', high = "red",
+                       limits = c(0, 10), na.value = NA, midpoint = 4) +
+  geom_sf(data = highways, linewidth = 0.25, color = 'grey40')
+  # scale_color_gradientn(colours = c("green", 'green', 'green', 'orange', 'red'))
 ```
 
 # data split - random
