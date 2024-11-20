@@ -1,5 +1,5 @@
 ---
-title: "Simple NNGP"
+title: "RF-GLS model"
 author: "Elizabeth Chun"
 date: "2024-11-11"
 output: html_document
@@ -25,8 +25,10 @@ library(basemapR)
 
 # load data
 
+Data without covariates - response is median
+
 ```{r}
-annual_conc_by_monitor_2019 <- read_csv("final_project/annual_conc_by_monitor_2019.csv")
+annual_conc_by_monitor_2019 <- read_csv("final_project/data/annual_conc_by_monitor_2019.csv")
 
 no2 = annual_conc_by_monitor_2019 %>% filter(`Parameter Name` == 'Nitrogen dioxide (NO2)') 
 
@@ -49,7 +51,7 @@ no2_filt_sf %>%
 ```
 
 
-# NNGP
+# RF-GLS without covariates
 
 ```{r data splitting}
 ### data splitting
@@ -80,9 +82,7 @@ st_as_sf(test_all, coords = c('lon', 'lat'), crs = 4326) %>%
 ```
 
 
-## 3.2 Random Forest Generalized Least Squares
-
-Now I will fit an NNGP on the entire training set with 10 neighbors using the BRISC package.
+## model fitting
 
 ```{r fit nngp}
 est_unknown <- RFGLS_estimate_spatial(as.matrix(train_all[, c('lon', 'lat')]), 
@@ -95,11 +95,7 @@ est_unknown <- RFGLS_estimate_spatial(as.matrix(train_all[, c('lon', 'lat')]),
 
 
 
-# 4. Model results and predictions
-
-## 4.2 Nearest neighbors GP
-
-For the NNGP, here are the estimated parameters. Note that BRISC reports $\phi$ as the reciprocal of the standard definition so I have taken $\frac{1}{\phi}$.
+## model results
 
 ```{r}
 Xtest <- as.matrix(train_all[, c('lon', 'lat')])
@@ -161,11 +157,15 @@ ggplot(pred_df_rand_sf) +
                        limits = c(-16, 26), na.value = NA, midpoint = 0)
 ```
 
-## with covariates
+# RF-GLS with covariates
 
 ```{r}
-no2_covar <- read_csv("final_project/NO2_CONUS_full_data.csv")
+no2_covar <- read_csv("final_project/data/NO2_CONUS_full_data.csv")
 ```
+
+## data splitting 
+
+Set seed for reproducibility and fair comparisons
 
 ```{r data splitting}
 ### data splitting
@@ -177,9 +177,8 @@ train_all = no2_covar[train_idx, ]
 test_all = no2_covar[-train_idx, ]
 ```
 
-## 3.2 Random Forest Generalized Least Squares
+## model with with covars
 
-Now I will fit an NNGP on the entire training set with 10 neighbors using the BRISC package.
 
 ```{r fit nngp}
 coords = c("Longitude", 'Latitude')
@@ -191,6 +190,8 @@ est_unknown <- RFGLS_estimate_spatial(as.matrix(train_all[, coords]),
                                       ntree = 50, cov.model = "exponential",
                                       nthsize = 20, param_estimate = TRUE)
 ```
+
+## predictions with covars
 
 ```{r}
 Xtest <- as.matrix(train_all[, covars])
@@ -253,46 +254,5 @@ ggplot(pred_df_rand_sf) +
 ```
 
 
-
-
-# predict on rough grid
-
-```{r}
-si <- expand.grid(lon =seq(from = -106, to = -93, by = 0.5), 
-                  lat = seq(from = 25, to = 36, by = 0.5))
-si_sf = st_as_sf(si, coords = c('lon', 'lat'), crs = 4326)
-
-tx_xform = sf::st_transform(tx, crs = 4326)
-texas_si = si_sf[tx_xform, ]
-
-texas_si_final = texas_si %>% 
-  st_drop_geometry() %>%  
-  bind_cols(st_coordinates(texas_si)) %>%
-  select(lat = Y, lon = X)
-```
-
-
-```{r nngp prediction}
-preds_grid = BRISC_prediction(fit_nngp, coords.0 = as.matrix(texas_si_final), 
-                              X.0 = cbind(1, as.matrix(texas_si_final)))
-
-hist(preds_grid$prediction)
-```
-
-```{r}
-# plot random predictions map
-
-pred_df_rand = texas_si_final %>%
-  mutate(
-    no2_ppm_pred = preds_grid$prediction
-  ) 
-pred_df_rand_sf = st_as_sf(pred_df_rand, coords = c('lon', 'lat'), crs = 4326)
-
-ggplot(pred_df_rand_sf) + 
-  base_map(bbox_no2, increase_zoom = 1, basemap = 'mapnik') +
-  geom_sf(aes(color = no2_ppm_pred), alpha = 1, size = 3) +
-  scale_color_gradient2(low = 'darkgreen', mid = 'orange', high = "red", 
-                       limits = c(0, 26), na.value = NA, midpoint = 20)
-```
 
 
