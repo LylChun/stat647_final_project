@@ -1,0 +1,101 @@
+---
+title: "STAT647 Climate Data"
+author: "Sophia Lazcano" 
+output: pdf_document
+---
+
+# **Libraries and Reading In Data**
+
+```{r libraries}
+library(terra)
+library(tidyverse)
+library(tidycensus)
+library(tigris)
+library(sf)
+library(ggplot2)
+```
+
+```{r setup, cache=TRUE}
+prism_dir <- "./data/PRISM/"
+climate_vars <- c("ppt", "tmax", "tmin", "tmean")
+year <- "2019"
+```
+
+### Get spatial points and shapefiles
+
+```{r censusSetup, cache=TRUE}
+# Setup our U.S. Census Bureau Data API Key
+options(tigris_use_cache = TRUE)
+census_api_key("####") # Add API key here
+```
+
+```{r getPoints, cache=TRUE}
+# Get same CRS as most things
+tx <- states(cb = TRUE) %>% filter(STUSPS == "TX")
+
+# Need data from the wrangling_new file (df: no2_data_no_temp)
+no2_data_no_temp_sf <- st_as_sf(no2_data_no_temp,
+                                coords = c("Longitude", "Latitude"),
+                                remove = F)
+
+st_crs(no2_data_no_temp_sf) <- st_crs(tx)
+```
+
+### Get Climate Data
+
+```{r gettingData, cache=TRUE}
+# New full df
+no2_data_sf <- no2_data_no_temp_sf
+
+for (temp_var in climate_vars) {
+  # Get into the right folder
+  curr_folder_str <- paste0("PRISM_", temp_var, "_stable_4kmM3_", year, "_all_bil")
+  # Get file name
+  file_str_template <- paste0("PRISM_", temp_var, "_stable_4kmM3_", year, "_bil.bil")
+  raster_data_file <- paste0(prism_dir, curr_folder_str, "/", file_str_template)
+  
+  # Get raster data
+  raster_data <- rast(raster_data_file)
+  crs(raster_data) <- st_crs(no2_data_no_temp_sf)$proj4string
+  # Values for this climate var in this month
+  vals <- extract(raster_data,
+                  no2_data_no_temp_sf[c("Longitude", "Latitude")])[, 2] 
+  
+  # Add raster data to the year dataframe
+  no2_data_sf[temp_var] <- vals
+}
+
+```
+
+
+
+```{r}
+# Test EDA
+ggplot() +
+  geom_sf(data = no2_data_sf, aes(color = tmax)) +
+  scale_color_continuous(low = "white", high = "#121E4F", na.value = "black") +
+  labs(title = "Max Temps for CONUS in 2019",
+       fill = "Degrees Celcius", x = "Longitude", y = "Latitude")
+```
+
+
+# Save the Data
+
+```{r}
+# years_climate <- years
+save(no2_data_sf,
+     file = "NO2_CONUS_full_data.RData")
+
+write.csv((no2_data_sf %>% st_drop_geometry()), file = "./NO2_CONUS_full_data.csv",
+          row.names = F)
+```
+
+
+
+
+
+
+
+
+
+

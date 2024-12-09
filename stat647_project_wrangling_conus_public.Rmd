@@ -1,0 +1,240 @@
+---
+title: "STAT647 Project Data Wrangling"
+author: "Sophia Lazcano" 
+output: pdf_document
+---
+
+# **Libraries and Reading In Data**
+
+```{r libraries}
+library(readxl)
+library(tidyverse)
+library(tidycensus)
+library(tigris)
+library(sf)
+library(ggplot2)
+```
+
+```{r dataSetup, cache=TRUE}
+year <- "2019"
+no2_df <- read.csv("./data/annual_conc_by_monitor_2019.csv", header = T,
+                   colClasses = c(State.Code = "character",
+                                  County.Code = "character"))
+no2_data <- no2_df %>%
+  filter((Parameter.Name == "Nitrogen dioxide (NO2)") &
+           !(State.Code %in% c("02","15","72")) &
+           (Pollutant.Standard == "NO2 1-hour 2010") &
+           (Metric.Used == "Daily Maximum 1-hour average")) %>%
+   select(State.Code, County.Code, Latitude, Longitude, Datum, Sample.Duration,
+          Metric.Used, Units.of.Measure, Observation.Count, Observation.Percent,
+          Arithmetic.Mean, Arithmetic.Standard.Dev, X50th.Percentile) %>%
+  mutate(GEOID = paste0(State.Code, County.Code))
+```
+
+
+# **Data Processing**
+
+### Feature Engineering and NA Values
+
+
+```{r checkingNA}
+# Check for NA values
+print("Number of NA values by year and pollutant")
+full_df_missing <- no2_data[apply(no2_data,
+                                  1,
+                                  function(x) any(is.na(x))
+                                  ),
+                            ]
+# Showing rows with missing data
+print(paste("NA values:", nrow(full_df_missing),
+            "Rows:", dim(no2_data)[1],
+            "Columns:", dim(no2_data)[2]
+            ))
+```
+
+No NA values!
+
+```{r moreFeatures, cache=TRUE}
+# Add more feature engineering code here
+```
+
+### EDA 
+```{r}
+# Add EDA code here
+```
+
+
+### Adding Census Features
+
+```{r censusSetup}
+# Setup our U.S. Census Bureau Data API Key
+options(tigris_use_cache = TRUE)
+census_api_key("####") # Add API key here
+```
+
+```{r gettingCensusData, cache=TRUE}
+yr_int <- as.integer(year) # 2019 queries
+
+# Total Population
+population <- get_acs("county", year = yr_int,
+                   variables = "B01001_001E") %>%
+  select(GEOID, estimate) %>% rename(total_population = estimate)
+# Transportation
+## Public
+transit <- get_acs("county", year = yr_int,
+                   variables = "B08006_008") %>%
+  select(GEOID, estimate) %>% rename(total_public_transit = estimate)
+## Car/truck/van alone
+transit <- get_acs("county", year = yr_int,
+                   variables = "B08006_003") %>%
+  select(GEOID, estimate) %>% rename(total_private_vehicle = estimate) %>%
+  right_join(transit, by = "GEOID")
+## Car/truck/van carpool
+transit <- get_acs("county", year = yr_int,
+                   variables = "B08006_004") %>%
+  select(GEOID, estimate) %>% rename(total_carpool_vehicle = estimate) %>%
+  right_join(transit, by = "GEOID")
+## No vehicle
+transit <- get_acs("county", year = yr_int,
+                   variables = "B08014_002") %>%
+  select(GEOID, estimate) %>% rename(total_no_vehicle = estimate) %>%
+  right_join(transit, by = "GEOID")
+
+census_data <- population %>%
+  left_join(transit, by = "GEOID")
+```
+
+```{r addingCensusData, cache=TRUE}
+# Adding the Census data to the main df
+no2_data_no_temp <- no2_data %>% left_join(census_data, by = "GEOID")
+```
+
+
+### Adding Temp Data
+
+```{r gettingClimateData, cache=TRUE}
+# cooling <- read.table("./data/cooling_days_data.txt", header = F)
+# heating <- read.table("./data/heating_days_data.txt", header = F)
+# temp_avg <- read.table("./data/temp_avg_data.txt", header = F)
+# temp_max <- read.table("./data/temp_max_data.txt", header = F)
+# temp_min <- read.table("./data/temp_min_data.txt", header = F)
+```
+
+```{r settingClimateNames}
+# colnames(cooling) <- c("Code", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12") 
+# colnames(heating) <- c("Code", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12") 
+# colnames(temp_avg) <- c("Code", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12") 
+# colnames(temp_max) <- c("Code", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12") 
+# colnames(temp_min) <- c("Code", "01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12") 
+```
+
+```{r getTXClimateData}
+# # Filter for TX data
+# cooling_df <- cooling %>% mutate(Code = as.character(Code)) %>% filter(str_detect(Code, "^48"))
+# heating_df <- heating %>% mutate(Code = as.character(Code)) %>% filter(str_detect(Code, "^48"))
+# temp_avg_df <- temp_avg %>% mutate(Code = as.character(Code)) %>% filter(str_detect(Code, "^48"))
+# temp_max_df <- temp_max %>% mutate(Code = as.character(Code)) %>% filter(str_detect(Code, "^48"))
+# temp_min_df <- temp_min %>% mutate(Code = as.character(Code)) %>% filter(str_detect(Code, "^48"))
+# 
+# # Filter from 2019 - 2023 and make County GEOID and Year columns
+# cooling_df <- cooling_df %>%
+#   filter(str_detect(Code, "2019$")
+#          | str_detect(Code, "2020$") | str_detect(Code, "2021$")
+#          |str_detect(Code, "2022$") | str_detect(Code, "2023$")) %>%
+#   mutate(GEOID = substr(Code, 1, 5), Year = as.factor(substr(Code, 8, 11))) %>%
+#   select(-Code)
+# 
+# heating_df <- heating_df %>% 
+#   filter(str_detect(Code, "2019$")
+#          | str_detect(Code, "2020$") | str_detect(Code, "2021$")
+#          |str_detect(Code, "2022$") | str_detect(Code, "2023$")) %>%
+#   mutate(GEOID = substr(Code, 1, 5), Year = as.factor(substr(Code, 8, 11))) %>%
+#   select(-Code)
+# 
+# temp_avg_df <- temp_avg_df %>% 
+#   filter(str_detect(Code, "2019$")
+#          | str_detect(Code, "2020$") | str_detect(Code, "2021$")
+#          |str_detect(Code, "2022$") | str_detect(Code, "2023$")) %>%
+#   mutate(GEOID = substr(Code, 1, 5), Year = as.factor(substr(Code, 8, 11))) %>%
+#   select(-Code)
+# 
+# temp_max_df <- temp_max_df %>% 
+#   filter(str_detect(Code, "2019$")
+#          | str_detect(Code, "2020$") | str_detect(Code, "2021$")
+#          |str_detect(Code, "2022$") | str_detect(Code, "2023$")) %>%
+#   mutate(GEOID = substr(Code, 1, 5), Year = as.factor(substr(Code, 8, 11))) %>%
+#   select(-Code)
+# 
+# temp_min_df <- temp_min_df %>% 
+#   filter(str_detect(Code, "2019$")
+#          | str_detect(Code, "2020$") | str_detect(Code, "2021$")
+#          |str_detect(Code, "2022$") | str_detect(Code, "2023$")) %>%
+#   mutate(GEOID = substr(Code, 1, 5), Year = as.factor(substr(Code, 8, 11))) %>%
+#   select(-Code)
+```
+
+
+
+
+
+
+### Saving Data
+
+```{r}
+save(agg_years, pollutants, years, tx, agg_years_sf, pol_units, yearly_cenus_data,
+     pol_val_col_names, years_list_prep, years_19_22, file = "processed_data.RData")
+```
+
+
+I want to aggregate my data by year averages of pollutant values (in column 1) and air quality index values (called Daily.AQI.Value), but using this code, I go from 48 unique longitude and latitude pairs to 12. How can I modify this code to do what I want in terms of columns returned but not lose my information of 
+
+
+
+
+# **Combining Census, Climate, and Pollution Data**
+
+```{r}
+load("processed_data.RData")
+load("climate_data_monthly_county_level.RData")
+```
+
+```{r}
+complete_data <- list() # From years 2019-2022
+for (yr in years_climate) {
+  for (pol in pollutants) {
+    pollution_data <- agg_years[[yr]][[pol]]
+    
+    census_data <- yearly_cenus_data[[yr]] %>%
+      mutate(perc_no_vehicle = total_no_vehicle / total_population,
+             perc_carpool_vehicle = total_carpool_vehicle / total_population,
+             perc_private_vehicle = total_private_vehicle / total_population,
+             perc_public_transit = total_public_transit / total_population) %>%
+      select(-c(total_no_vehicle, total_carpool_vehicle,
+                total_private_vehicle, total_public_transit))
+    
+    weather_data <- climate_data[[yr]] %>%
+      select(-c(Longitude, Latitude)) %>% st_drop_geometry()
+    
+    full_yr_data <- pollution_data %>% left_join(census_data, by = "GEOID") %>%
+      left_join(weather_data, by = c("GEOID", "Month"))
+    
+    complete_data[[yr]][[pol]] <- full_yr_data
+  }
+}
+```
+
+```{r}
+# Save complete data
+save(complete_data, years_climate, pollutants, climate_vars, month_chars,
+     agg_years, yearly_cenus_data, climate_data, years_list_prep,
+     tx, pol_val_col_names, pol_units, county_polys, county_points, county_points_coords,
+     file = "full_data.RData")
+```
+
+## Test data
+
+```{r}
+load("full_data.RData") # old
+```
+
+

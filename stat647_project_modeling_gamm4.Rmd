@@ -1,0 +1,308 @@
+---
+title: "STAT647 Project Data Modeling GAMM4"
+author: "Sophia Lazcano" 
+output: pdf_document
+---
+
+# **Libraries and Reading In Data**
+
+```{r setup}
+library(tidyverse)
+library(sf)
+library(mgcv)
+library(HRW)
+library(gamm4)
+library(brms)
+library(GGally)
+set.seed(1)
+```
+
+```{r dataLoadIn, cache=TRUE}
+load("NO2_CONUS_full_data.RData")
+```
+
+```{r dataSetup, cache=TRUE}
+# Choose covariates
+all_data <- no2_data_sf %>%
+  mutate(perc_no_vehicle = total_no_vehicle / total_population,
+         perc_carpool_vehicle = total_carpool_vehicle / total_population,
+         perc_private_vehicle = total_private_vehicle / total_population,
+         perc_public_transit = total_public_transit / total_population
+         ) %>%
+  select(State.Code, GEOID, Latitude, Longitude, total_population, ppt, tmax,
+         tmean, tmin, perc_no_vehicle, perc_carpool_vehicle,
+         perc_private_vehicle, perc_public_transit, X50th.Percentile)
+
+# Data splitting
+### 80-20% train-test split
+train_idx <- sample(nrow(all_data), 0.8*nrow(all_data))
+train_df <- all_data[train_idx, ] %>% st_drop_geometry()
+test_df <- all_data[-train_idx, ] %>% st_drop_geometry()
+```
+
+
+# **Modeling**
+
+Our data is stored as test-train split data frames
+
+## **Bayesian Hierarchical Model**
+
+### NO2 to Test Performance
+
+```{r fitBHM, cache=TRUE}
+# Fit Bayesian Hierarchical Model
+bhm_no2_model <- brm(
+  formula = X50th.Percentile ~ 
+    (1 | GEOID) +  # Random intercept for counties
+    s(Latitude, Longitude) +  # Spatial smooth (spline-based, not a spline itself)
+    as.factor(State.Code) +
+    perc_carpool_vehicle + perc_private_vehicle + total_population +
+    s(ppt) + s(tmax) + s(tmin) + s(tmean),  # Covariates
+  family = gaussian(),  # Gaussian for continuous response
+  data = train_df,
+  chains = 4, # Num of Markov Chains
+  iter = 6000, # For each chain, higher means chains can mix, r-hat at 2000: 4.55
+  cores = 5, # My laptop can handle this lol
+  control = list(adapt_delta = 0.98, max_treedepth = 12)  # Improve convergence
+) # tree depth default at 10
+```
+
+```{r}
+# Save model in case of time-out
+save(bhm_no2_model, file = "bhm_no2_chain4_iter6000_depth12_delta98.RData")
+```
+
+```{r}
+# Check model summary
+summary(bhm_no2_model)
+
+# Check convergence diagnostics
+plot(bhm_no2_model)
+```
+
+```{r}
+# Prediction on Test Data
+# Generate predictions for test data
+test_df$predicted <- predict(bhm_no2_model,
+                             newdata = (test_df %>%
+                                          mutate(State.Code =
+                                                   as.factor(State.Code)) %>%
+                                          filter(State.Code != "28")
+                                          ))[, "Estimate"]
+
+# Evaluate Predictions
+rmse <- sqrt(mean((test_df$X50th.Percentile - test_df$predicted)^2, na.rm = TRUE))
+mae <- mean(abs(test_df$X50th.Percentile - test_df$predicted), na.rm = TRUE)
+
+cat("RMSE:", rmse, "\nMAE:", mae)
+```
+
+
+
+## **GAM**
+
+```{r initGAM, cache=TRUE}
+gam_pol_spline_coords <- gamm4(X50th.Percentile ~
+                                 s(Latitude) + s(Longitude) +
+                                 as.factor(State.Code) +
+                                 perc_carpool_vehicle + perc_private_vehicle +
+                                 total_population +
+                                 s(ppt) + s(tmax) + s(tmin) + s(tmean),
+                               random = ~(1|GEOID),
+                               data = train_df)
+gam_pol_linear_coords <- gamm4(X50th.Percentile ~
+                                 Latitude + Longitude +
+                                 as.factor(State.Code) +
+                                 perc_carpool_vehicle + perc_private_vehicle +
+                                 total_population +
+                                 s(ppt) + s(tmax) + s(tmin) + s(tmean),
+                               random = ~(1|GEOID),
+                               data = train_df)
+```
+
+```{r initCompare, cache=TRUE}
+anova(gam_pol_spline_coords$mer, gam_pol_linear_coords$mer)
+```
+
+Since our p-value is 1, then the ANOVA test favors the simpler model with 61 parameters instead of the spline model with 63 parameters.
+
+```{r nextCompare, cache=TRUE}
+gam_pol_linear_ppt <- gamm4(X50th.Percentile ~
+                                 Latitude + Longitude +
+                                 as.factor(State.Code) +
+                                 perc_carpool_vehicle + perc_private_vehicle +
+                                 total_population +
+                                 ppt + s(tmax) + s(tmin) + s(tmean),
+                               random = ~(1|GEOID),
+                               data = train_df)
+
+anova(gam_pol_linear_coords$mer, gam_pol_linear_ppt$mer)
+```
+
+Since our p-value is high, then the ANOVA test favors the simpler model with 60 parameters instead of the spline model with 61 parameters.
+
+```{r nextCompare2, cache=TRUE}
+gam_pol_linear_tmax <- gamm4(X50th.Percentile ~
+                                 Latitude + Longitude +
+                                 as.factor(State.Code) +
+                                 perc_carpool_vehicle + perc_private_vehicle +
+                                 total_population +
+                                 ppt + tmax + s(tmin) + s(tmean),
+                               random = ~(1|GEOID),
+                               data = train_df)
+
+anova(gam_pol_linear_ppt$mer, gam_pol_linear_tmax$mer)
+```
+
+Since our p-value is high, then the ANOVA test favors the simpler model with 59 parameters instead of the spline model with 60 parameters.
+
+```{r nextCompare3, cache=TRUE}
+gam_pol_linear_tmin <- gamm4(X50th.Percentile ~
+                                 Latitude + Longitude +
+                                 as.factor(State.Code) +
+                                 perc_carpool_vehicle + perc_private_vehicle +
+                                 total_population +
+                                 ppt + tmax + tmin + s(tmean),
+                               random = ~(1|GEOID),
+                               data = train_df)
+
+anova(gam_pol_linear_tmax$mer, gam_pol_linear_tmin$mer)
+```
+
+Since our p-value is high, then the ANOVA test favors the simpler model with 58 parameters instead of the spline model with 59 parameters.
+
+```{r nextCompare4, cache=TRUE}
+gam_pol_linear <- gamm4(X50th.Percentile ~
+                                 Latitude + Longitude +
+                                 as.factor(State.Code) +
+                                 perc_carpool_vehicle + perc_private_vehicle +
+                                 total_population +
+                                 ppt + tmax + tmin + tmean,
+                               random = ~(1|GEOID),
+                               data = train_df)
+
+anova(gam_pol_linear_tmin$mer, gam_pol_linear$mer)
+```
+
+Since our p-value is 1, then the ANOVA test favors the simpler model with 57 parameters instead of the spline model with 58 parameters.
+
+### Final GAM Evaluation
+
+```{r LMER, cache=TRUE}
+# pol_linear <- lmer(X50th.Percentile ~
+#                                  Latitude + Longitude +
+#                                  as.factor(State.Code) +
+#                                  perc_carpool_vehicle + perc_private_vehicle +
+#                                  total_population +
+#                                  ppt + tmax + tmin + tmean + (1|GEOID),
+#                                data = train_df)
+# 
+# anova(gam_pol_linear_tmin$mer, pol_linear)
+```
+
+
+```{r GAMpreds, cache=TRUE}
+# Compare "best" and all-spline models
+### Train
+y_hat_train_no_spline <- gam_pol_linear$gam$fitted.values
+y_hat_train_splines <- gam_pol_spline_coords$gam$fitted.values
+
+### Test
+y_hat_test_no_spline <- predict(gam_pol_linear$gam,
+                           newdata = (test_df %>% filter(State.Code != "28")),
+                           se.fit = TRUE)
+y_hat_test_splines <- predict(gam_pol_spline_coords$gam,
+                         newdata = (test_df %>% filter(State.Code != "28")),
+                         se.fit = TRUE)
+```
+
+```{r metricsInit, cache=TRUE}
+smape <- function(y_hat, y) {
+  return (mean(
+      abs(y_hat - y) / ((abs(y_hat) + abs(y)) / 2),
+       na.rm = TRUE) * 100)
+}
+
+rmse <- function(y_hat, y) {
+  return(sqrt(mean((y - y_hat)^2, na.rm = TRUE)))
+}
+```
+
+```{r}
+# Get train and test metrics for both models
+y_test <- (test_df %>% filter(State.Code != "28"))$X50th.Percentile
+
+# Train
+### SMAPE
+cat("SMAPE (train: splines)",
+    smape(y_hat_train_splines, train_df$X50th.Percentile), "\n")
+cat("SMAPE (train: no splines)",
+    smape(y_hat_train_no_spline, train_df$X50th.Percentile), "\n\n")
+
+### RMSE
+cat("RMSE (train: splines)",
+    rmse(y_hat_train_splines, train_df$X50th.Percentile), "\n")
+cat("RMSE (train: no splines)",
+    rmse(y_hat_train_no_spline, train_df$X50th.Percentile), "\n\n")
+
+# Test
+### SMAPE
+cat("SMAPE (test: splines)",
+    smape(y_hat_test_splines$fit, y_test), "\n")
+cat("SMAPE (test: no splines)",
+    smape(y_hat_test_no_spline$fit, y_test), "\n\n")
+
+### RMSE
+cat("RMSE (test: splines)",
+    rmse(y_hat_test_splines$fit, y_test), "\n")
+cat("RMSE (test: no splines)",
+    rmse(y_hat_test_no_spline$fit, y_test), "\n\n")
+```
+
+GAM with splines performs better
+
+### GAM without covariates
+
+```{r noCovarGAM, cache=TRUE}
+gam_pol_splines_no_covar <- gamm4(X50th.Percentile ~
+                                    s(Latitude) + s(Longitude),
+                                  data = train_df)
+
+y_hat_train_splines_no_covar <- gam_pol_splines_no_covar$gam$fitted.values
+
+### Test
+y_hat_test_splines_no_covar <- predict(gam_pol_splines_no_covar$gam,
+                           newdata = (test_df %>% filter(State.Code != "28")),
+                           se.fit = TRUE)
+```
+
+```{r evalCovarNoCovar, cache=TRUE}
+# Train
+### SMAPE
+cat("SMAPE (train: splines covar)",
+    smape(y_hat_train_splines, train_df$X50th.Percentile), "\n")
+cat("SMAPE (train: splines no covar)",
+    smape(y_hat_train_splines_no_covar, train_df$X50th.Percentile), "\n\n")
+
+### RMSE
+cat("RMSE (train: splines covar)",
+    rmse(y_hat_train_splines, train_df$X50th.Percentile), "\n")
+cat("RMSE (train: splines no covar)",
+    rmse(y_hat_train_splines_no_covar, train_df$X50th.Percentile), "\n\n")
+
+# Test
+### SMAPE
+cat("SMAPE (test: splines covar)",
+    smape(y_hat_test_splines$fit, y_test), "\n")
+cat("SMAPE (test: splines no covar)",
+    smape(y_hat_test_splines_no_covar$fit, y_test), "\n\n")
+
+### RMSE
+cat("RMSE (test: splines covar)",
+    rmse(y_hat_test_splines$fit, y_test), "\n")
+cat("RMSE (test: splines no covar)",
+    rmse(y_hat_test_splines_no_covar$fit, y_test), "\n\n")
+```
+
+
+
