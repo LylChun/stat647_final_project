@@ -1,0 +1,211 @@
+---
+title: "Final Project"
+output: html_document
+date: "2024-11-14"
+---
+
+```{r}
+library(tidyverse)
+
+library(sp) # for defining points/polygons
+library(ggplot2) # for plotting
+library(dplyr) # for easy data manipulation
+library(spdep)
+library(fields)
+library(sf)
+library(ggplot2)
+library(basemapR)
+library(tidyverse)
+library(tidycensus)
+library(nngeo)
+library(spatialreg)
+library(sp)
+library(spdep)
+library(maps)
+```
+
+
+```{r}
+# import data
+
+annual_conc_by_monitor_2019 <- read_csv("/Users/jasperstone/Desktop/Joseph/2024 Fall/STAT 647/FinalProject/annual_conc_by_monitor_2019.csv")
+
+head(annual_conc_by_monitor_2019)
+
+annual_conc_by_monitor_2019 %>% names
+annual_conc_by_monitor_2019$`Parameter Name` %>% unique
+
+
+
+no2 <- annual_conc_by_monitor_2019 %>% filter(`Parameter Name` == 'Nitrogen dioxide (NO2)')
+head(no2)
+
+
+state_code = no2$`State Code` %>% unique
+
+# Exclude Alaska, Hawaii and Puerto Rico
+state_excl = setdiff(state_code, c("02","15","72"))
+
+
+data <- no2 %>% 
+  filter(`Metric Used` == "Daily Maximum 1-hour average") %>% 
+  select(`State Code`, `County Code`, Longitude, Latitude, `50th Percentile`) %>% 
+  filter(`State Code` %in% state_excl)
+
+head(data)
+data$`State Code` %>% unique
+
+
+ggplot(data) + geom_point(aes(Longitude, Latitude))
+```
+
+
+```{r}
+### data splitting
+no2_filt <- data
+
+set.seed(1)
+
+# get 80/20 train test split
+train_idx = sample(nrow(no2_filt), 0.8*nrow(no2_filt))
+train_all = no2_filt[train_idx, ]
+test_all = no2_filt[-train_idx, ]
+
+# sanity check with non-spatial model
+lm_model = lm(`50th Percentile`~Longitude + Latitude , data = train_all)
+summary(lm_model)
+
+preds_lm = predict(lm_model, newdata = data.frame(Longitude = test_all$Longitude, Latitude = test_all$Latitude))
+
+# Define SMAPE function
+smape <- function(actual, predicted) {
+  mean(2 * abs(actual - predicted) / (abs(actual) + abs(predicted)) * 100, na.rm = TRUE)
+}
+
+# Calculate SMAPE
+actual_values <- test_all$`50th Percentile` # Replace with the actual column name
+predicted_values <- preds_lm
+smape_value <- smape(actual_values, predicted_values)
+
+# Print SMAPE
+print(paste("SMAPE:", round(smape_value, 3), "%"))
+
+
+
+points_sf <- st_as_sf((train_all %>% st_drop_geometry()), coords = c("Longitude","Latitude"))
+
+st_crs(points_sf) <- st_crs(train_all)
+
+county_points <- st_centroid(points_sf$geometry)
+#county_points <- st_transform(county_points, crs = 4326) # CRS of maps::map
+
+county_coords <- st_coordinates(county_points) %>%
+as.data.frame()
+
+
+thresh <- 100 # miles
+
+# Get nb
+dist <- rdist.earth(county_coords, miles = T) # lon-lat order
+A_by_dist <- ifelse(dist < thresh, 1, 0)
+nb <- mat2listw(A_by_dist)
+
+summary(nb)
+
+
+# View nb graph
+# maps::map("county", #regions = c(".", "alaska", "hawaii"),
+# boundary = TRUE, fill = TRUE, col = "lightgray", lty = 1)
+# plot.listw(nb, coords = county_coords, add = T, col = 4, lwd = 1)
+
+
+## CAR
+car_model <- spautolm(`50th Percentile` ~ 1, #Longitude + Latitude,
+listw = nb, family = "CAR",
+data = train_all)
+
+
+## SAR
+sar_model <- spautolm(`50th Percentile` ~ 1, #Longitude + Latitude,
+listw = nb, family = "SAR",
+data = train_all)
+
+car_summ <- summary(car_model)
+sar_summ <- summary(sar_model)
+```
+
+```{r}
+# Fit the complex model
+model1 <- lm(`50th Percentile` ~ Longitude + Latitude, data = train_all)
+
+# Fit the simpler model (intercept only)
+model2 <- lm(`50th Percentile` ~ 1, data = train_all)
+
+# Extract log-likelihoods
+logLik1 <- logLik(model1)
+logLik2 <- logLik(model2)
+
+# Compute test statistic
+lrt_stat <- -2 * (logLik2 - logLik1)
+lrt_stat
+```
+
+
+```{r}
+lmtest::lrtest(lm_model)
+anova(lm_model)
+car_summ
+sar_summ
+```
+
+
+
+```{r}
+test_points_sf <- st_as_sf((test_all %>% st_drop_geometry()), coords = c("Longitude","Latitude"))
+
+st_crs(test_points_sf) <- st_crs(test_all)
+
+test_county_points <- st_centroid(test_points_sf$geometry)
+#county_points <- st_transform(county_points, crs = 4326) # CRS of maps::map
+
+test_county_coords <- st_coordinates(test_county_points) %>%
+as.data.frame()
+
+
+thresh <- 100 # miles
+
+# Get nb
+test_dist <- rdist.earth(test_county_coords, miles = T) # lon-lat order
+test_A_by_dist <- ifelse(test_dist < thresh, 1, 0)
+test_nb <- mat2listw(test_A_by_dist)
+
+summary(test_nb)
+
+# pred_car <- predict(car_model, newdata = test_all, listw = test_nb)
+# pred_sar <- predict(sar_model, newdata = test_all, listw = test_nb)
+
+car_coef<- car_model$fit$coefficients
+sar_coef<- sar_model$fit$coefficients
+
+# Prepare test set data (intercept + predictors)
+predictors <- cbind(1, test_all$Longitude, test_all$Latitude) # 1 for the intercept
+car_predictions <- as.vector(predictors %*% car_coef) # Matrix multiplication
+sar_predictions <- as.vector(predictors %*% sar_coef) # Matrix multiplication
+
+# Actual values
+actual_values <- test_all$`50th Percentile` # Replace with the correct column name
+
+
+
+print(paste("Linear Model SMAPE:", round(smape_value, 3), "%"))
+# Calculate SMAPE
+car_smape_value <- smape(actual_values, car_predictions)
+print(paste("CAR SMAPE:", round(car_smape_value, 3), "%"))
+# Calculate SMAPE
+sar_smape_value <- smape(actual_values, sar_predictions)
+print(paste("SAR SMAPE:", round(sar_smape_value, 3), "%"))
+
+
+```
+
+
